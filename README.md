@@ -1,14 +1,25 @@
 # Jungle Gaming — Distributed Wagering Processor
 
-Backend financeiro com Bun 1.x, NestJS, MikroORM, PostgreSQL e SQS/LocalStack. O projeto mantém os testes e o domínio originais e acrescenta processamento distribuído, API, ledger persistente, inbox/outbox e reconciliação.
+Serviço financeiro distribuído para processar apostas com Bun 1.x, NestJS, MikroORM, PostgreSQL e SQS/LocalStack. Recebe operações por HTTP e pela fila usando o mesmo caso de uso, com dinheiro decimal exato, idempotência persistente, controle de concorrência por carteira, ledger imutável, inbox/outbox transacionais e reconciliação.
 
-## Iniciar (Docker Desktop aberto)
+## Pré-requisitos
 
-Na pasta que contém `compose.yaml`:
+- Git para clonar o repositório.
+- Docker Engine com Docker Compose v2, ou Docker Desktop aberto e configurado para containers Linux.
+- Portas locais 3000, 3001, 3002, 5433 e 4566 disponíveis para a configuração padrão.
+- Para executar a aplicação ou os testes diretamente no computador: Bun 1.x. A imagem Docker usa Bun 1.3.5; a checagem de tipos também foi validada no Windows com Bun 1.4.4.
+
+A execução da aplicação e dos testes em containers não exige Bun, PostgreSQL nem AWS CLI instalados no computador. Os exemplos com variáveis e `Invoke-RestMethod` usam PowerShell.
+
+## Iniciar com Docker
 
 ```powershell
+git clone https://github.com/Thalys-T/jungle-gaming-backend-challenge.git
+cd jungle-gaming-backend-challenge
 docker compose up --build -d
 ```
+
+Se já clonou o projeto, execute o comando do Compose na pasta que contém `compose.yaml`.
 
 O Compose inicia PostgreSQL, LocalStack, aplica as migrations e inicia **três instâncias independentes** da aplicação:
 
@@ -21,15 +32,16 @@ docker compose logs -f app1 app2 app3
 Invoke-RestMethod http://localhost:3000/health/ready
 ```
 
-Não há autenticação neste ambiente de desenvolvimento. Leia a decisão em `ARCHITECTURE.md`.
+Autenticação não foi implementada nesta entrega, conforme permitido pelo desafio. O ponto de extensão e o desenho com Identity Provider externo estão descritos em [ARCHITECTURE.md](ARCHITECTURE.md#autenticação).
 
 ## Desenvolvimento no host
 
-Bun 1.x instalado. A referência reproduzível do Docker é Bun 1.3.5; o projeto também usa APIs disponíveis em Bun 1.4.x.
+Com Bun 1.x instalado, execute na raiz do repositório. Caso as três instâncias do Compose estejam ativas, pare-as para liberar a porta 3000 e evitar workers concorrentes com a execução local:
 
 ```powershell
+docker compose stop app1 app2 app3
 bun install --frozen-lockfile
-docker compose up -d postgres localstack
+docker compose up -d --wait postgres localstack
 bun run migrate
 bun run start
 ```
@@ -96,24 +108,49 @@ Envelope de entrada:
 
 ## Testes
 
-Use uma base **exclusiva de desenvolvimento/testes**, pois testes criam registros auditáveis e não apagam ledger. PostgreSQL deve estar migrado; a suíte de integração aplica migrations pendentes.
+### Executar todas as suítes em Docker
+
+O comando `bun run test:all` executa a checagem de tipos e, em sequência, os testes unitários, de integração, distribuídos e de mensageria. O procedimento abaixo executa esse comando dentro do container, sem exigir Bun no computador.
+
+Use uma base **exclusiva para testes**, pois as suítes criam registros financeiros auditáveis e não apagam o ledger. Pare as instâncias da aplicação e qualquer worker iniciado manualmente antes dos testes: parte da suíte de mensageria usa as mesmas filas do LocalStack local.
 
 ```powershell
-bun run typecheck
-bun run test
-# Docker: PostgreSQL ativo
-bun run test:integration
-bun run test:distributed
-# PostgreSQL + LocalStack ativos. Pare APIs/workers para evitar consumidores concorrendo com os cenários controlados:
 docker compose stop app1 app2 app3
-bun run test:messaging
+docker compose up -d --wait postgres localstack
+docker compose build migrate
+
+# Nome exclusivo para cada execução; mantém os dados da aplicação separados.
+$testDatabase = 'jungle_tests_' + [guid]::NewGuid().ToString('N')
+docker compose exec -T postgres createdb -U jungle $testDatabase
+docker compose run --rm -T --no-deps -e "DB_NAME=$testDatabase" migrate bun run test:all
 ```
+
+As suítes aplicam as migrations na base de teste. Os registros e a base ficam preservados após a execução. O resultado validado foi **82 testes passando, nenhuma falha**; ambiente e cobertura estão em [VALIDATION.md](VALIDATION.md).
+
+Para retomar as três instâncias após os testes:
+
+```powershell
+docker compose up -d app1 app2 app3
+```
+
+### Comandos disponíveis
+
+Para executar comandos diretamente no computador, instale as dependências com `bun install --frozen-lockfile`. Os testes de integração, distribuídos e mensageria exigem configurar `DB_NAME` para uma base exclusiva existente; por padrão, a configuração aponta para a base da aplicação, `jungle_wagering`.
+
+| Comando | Verificação | Dependências externas |
+| --- | --- | --- |
+| `bun run typecheck` | TypeScript estrito | Nenhuma |
+| `bun run test` | Unidade | Nenhuma |
+| `bun run test:integration` | Persistência, constraints, migrations e HTTP | PostgreSQL |
+| `bun run test:distributed` | Concorrência com três processos | PostgreSQL |
+| `bun run test:messaging` | SQS, outbox, retry, DLQ e recuperação | PostgreSQL e LocalStack |
+| `bun run test:all` | Todas as verificações acima | PostgreSQL e LocalStack |
 
 `test:distributed` cria três processos Bun reais, envia 50 duplicatas, disputa saldo, processa wallets distintas e verifica replay após reinício. A suíte de mensageria testa SQS real, dois publishers, redelivery, DLQ, retry e morte depois do commit/antes do ack. Pode levar mais de um minuto pela expiração real da visibilidade SQS.
 
 `CRASH_AFTER_COMMIT=1` é um failpoint **somente para testes de crash**, termina o worker com código 99 entre commit e ack. `CRASH_AFTER_PUBLISH=1` encerra o publisher com código 98 depois do envio e antes de confirmar a marcação SQL. Nunca habilite esses failpoints no uso normal.
 
-Os testes de falha transitória do consumidor usam filas exclusivas e PostgreSQL/LocalStack reais, verificando recuperação sem duplicação e redrive após cinco recebimentos. Veja `VALIDATION.md` para o ambiente e os resultados da validação.
+Os testes de falha transitória do consumidor usam filas exclusivas e PostgreSQL/LocalStack reais, verificando recuperação sem duplicação e redrive após cinco recebimentos. Não foi realizado benchmark de carga. As decisões técnicas e os limites da solução estão em [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Migrations e dados
 
