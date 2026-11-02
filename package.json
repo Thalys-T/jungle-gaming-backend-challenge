@@ -1,0 +1,35 @@
+{
+  "name": "jugleigaming",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "bun src/main.ts",
+    "worker": "bun src/worker.ts",
+    "migrate": "bun scripts/migrate.ts",
+    "migration:create": "bun scripts/create-migration.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test test/unit",
+    "test:integration": "bun test --timeout 120000 test/integration",
+    "test:distributed": "bun test --timeout 180000 test/distributed",
+    "test:messaging": "bun test --timeout 180000 test/messaging",
+    "test:all": "bun run typecheck && bun run test && bun run test:integration && bun run test:distributed && bun run test:messaging"
+  },
+  "devDependencies": {
+    "@mikro-orm/cli": "6",
+    "@types/bun": "latest",
+    "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "@mikro-orm/core": "6",
+    "@mikro-orm/migrations": "6",
+    "@mikro-orm/postgresql": "6",
+    "decimal.js": "^10.6.0",
+    "@nestjs/common": "^11.1.0",
+    "@nestjs/core": "^11.1.0",
+    "@nestjs/platform-express": "^11.1.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2",
+    "@aws-sdk/client-sqs": "^3.900.0"
+  }
+}
